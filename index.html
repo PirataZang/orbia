@@ -28,17 +28,13 @@
           <div class="group-head"><h2 id="h-convs">Conversas</h2></div>
           <ul class="list" id="convs"></ul>
         </section>
+        <div class="usage" id="usage" hidden></div>
       </aside>
 
       <main class="main">
         <header class="top" id="top">
           <div class="top-title" id="title"></div>
-          <div class="themes" role="radiogroup" aria-label="Tema">
-            <button type="button" role="radio" data-theme="roxo" aria-label="Tema Roxo" title="Roxo"></button>
-            <button type="button" role="radio" data-theme="azul" aria-label="Tema Azul" title="Azul"></button>
-            <button type="button" role="radio" data-theme="branco" aria-label="Tema Branco" title="Branco"></button>
-            <button type="button" role="radio" data-theme="preto" aria-label="Tema Preto" title="Preto"></button>
-          </div>
+          <button type="button" class="icon-btn gear" id="gear" aria-label="Configurações" title="Configurações"></button>
         </header>
 
         <div class="scroll" id="scroll">
@@ -46,11 +42,14 @@
         </div>
 
         <form class="composer" id="composer">
+          <div class="slash" id="slash" role="listbox" aria-label="Skills" hidden></div>
+          <div class="panel" id="panel" role="dialog" aria-label="Comandos" hidden></div>
           <div class="box">
             <div class="attachments" id="attachments"></div>
             <div class="row">
               <button type="button" class="icon-btn big" id="attach" aria-label="Anexar imagem" title="Anexar imagem"></button>
-              <textarea id="input" rows="1" placeholder="Escreva sua mensagem…" aria-label="Mensagem"></textarea>
+              <button type="button" class="icon-btn big" id="cmds" aria-label="Comandos" title="Comandos" aria-haspopup="dialog" aria-expanded="false" hidden></button>
+              <textarea id="input" rows="1" placeholder="Escreva sua mensagem…" aria-label="Mensagem" role="combobox" aria-autocomplete="list" aria-controls="slash" aria-expanded="false"></textarea>
               <button type="submit" class="send" id="send" aria-label="Enviar"></button>
             </div>
           </div>
@@ -61,6 +60,17 @@
         <div class="drop" id="drop" hidden><div>Solte a imagem para anexar</div></div>
       </main>
     </div>
+
+    <dialog class="confirm" id="confirm" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <h2 id="confirm-title">Apagar esta conversa?</h2>
+        <p id="confirm-text"></p>
+        <div class="confirm-actions">
+          <button type="submit" value="cancel" class="btn-ghost" autofocus>Cancelar</button>
+          <button type="submit" value="ok" class="btn-danger">Apagar conversa</button>
+        </div>
+      </form>
+    </dialog>
 
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
       <symbol id="saturno" viewBox="0 0 100 100">

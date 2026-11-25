@@ -27,7 +27,8 @@ O Orbia não conecta em nada nem pede chave ou conta. Ele roda as mesmas ferrame
 ## Capabilities and Constraints
 
 - Plug and play: acha as IAs sozinho, sobe o `ollama serve` se precisar, nunca pede terminal para instalar ou abrir.
-- Não envia nada para lugar que a pessoa não escolheu; não altera arquivos nem configurações das ferramentas.
+- Não envia nada para lugar que a pessoa não escolheu.
+- A configuração das ferramentas só muda pela tela de configurações, por ação da pessoa, com cópia `.bak` dos arquivos de texto (decisão do dono em 2026-11-25; ver `docs/superpowers/specs/2026-11-25-orbia-configuracoes-design.md`).
 - Leve: divide a máquina com modelos locais que usam muita RAM.
 - Fora da v1: chaves de API, download de modelos, aprovação de ações das ferramentas, voz, plugins, auto-update, macOS.
 

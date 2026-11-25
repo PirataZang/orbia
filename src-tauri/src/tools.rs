@@ -19,6 +19,55 @@ pub struct Ai {
     pub model: Option<String>,
     pub label: String,
     pub images: bool,
+    /// Ollama: o modelo sabe "pensar" antes de responder (capacidade `thinking`).
+    #[serde(default)]
+    pub think: bool,
+}
+
+/// Níveis de esforço que cada ferramenta aceita. Vazio = não dá para escolher.
+pub fn effort_levels(ai: &Ai) -> &'static [&'static str] {
+    match ai.kind.as_str() {
+        "claude" => &["low", "medium", "high", "xhigh", "max"],
+        "codex" => &["low", "medium", "high", "xhigh"],
+        "ollama" if ai.think && ai.model.as_deref().is_some_and(|m| m.starts_with("gpt-oss")) => &["off", "low", "medium", "high"],
+        "ollama" if ai.think => &["off", "on"],
+        _ => &[],
+    }
+}
+
+/// Opções do Orbia para uma IA (guardadas em `opcoes.json`, nunca na ferramenta).
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct AiOptions {
+    /// Claude: modelo padrão para novas conversas.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Esforço padrão para novas conversas (ver `effort_levels`).
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Ollama: instrução de sistema. Claude: instrução extra (`--append-system-prompt`).
+    #[serde(default)]
+    pub system: String,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub num_ctx: Option<u32>,
+}
+
+impl AiOptions {
+    pub fn validate(mut self) -> Result<Self, String> {
+        if self.model.as_deref().is_some_and(|m| !["opus", "sonnet", "haiku"].contains(&m)) {
+            self.model = None;
+        }
+        if self.effort.as_deref().is_some_and(|e| !["low", "medium", "high", "xhigh", "max", "on", "off"].contains(&e)) {
+            self.effort = None;
+        }
+        if self.system.len() > 20_000 {
+            return Err("A instrução passou de 20 mil caracteres.".into());
+        }
+        self.temperature = self.temperature.map(|t| t.clamp(0.0, 2.0));
+        self.num_ctx = self.num_ctx.filter(|n| (1024..=262_144).contains(n));
+        Ok(self)
+    }
 }
 
 #[derive(Serialize)]
@@ -130,7 +179,7 @@ fn cmd_shim_script(cmd: &str) -> Option<String> {
 }
 
 /// Comando pronto para rodar o binário, sem shell. No Windows, `.cmd` vira `node <script>`.
-fn command(bin: &Path) -> Command {
+pub fn command(bin: &Path) -> Command {
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = if bin.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd")) {
         let dir = bin.parent().unwrap_or(Path::new("."));
@@ -186,28 +235,229 @@ pub fn scan() -> Scan {
     let models = tags.as_ref().and_then(|t| t["models"].as_array().cloned()).unwrap_or_default();
     for m in &models {
         let Some(name) = m["name"].as_str() else { continue };
-        let vision = ureq::post(&format!("{OLLAMA}/api/show"))
+        let caps = ureq::post(&format!("{OLLAMA}/api/show"))
             .timeout(Duration::from_secs(3))
             .send_string(&json!({ "model": name }).to_string())
             .ok()
             .and_then(|r| r.into_string().ok())
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| v["capabilities"].as_array().cloned())
-            .is_some_and(|c| c.iter().any(|x| x == "vision"));
+            .unwrap_or_default();
+        let has = |c: &str| caps.iter().any(|x| x == c);
         ais.push(Ai {
             id: format!("ollama:{name}"),
             kind: "ollama".into(),
             model: Some(name.into()),
             label: name.trim_end_matches(":latest").into(),
-            images: vision,
+            images: has("vision"),
+            think: has("thinking"),
         });
     }
     for (kind, label) in [("claude", "Claude"), ("gemini", "Gemini"), ("codex", "Codex")] {
         if find(kind).is_some() {
-            ais.push(Ai { id: kind.into(), kind: kind.into(), model: None, label: label.into(), images: true });
+            ais.push(Ai { id: kind.into(), kind: kind.into(), model: None, label: label.into(), images: true, think: false });
         }
     }
     Scan { ais, ollama_installed: ollama_bin.is_some() || tags.is_some() }
+}
+
+// ---------- área de transferência ----------
+
+/// Imagem copiada (print, imagem de outro app) como data URL PNG. O WebKitGTK nem sempre
+/// entrega a imagem no evento de colar, então a tela pede aqui.
+pub fn clipboard_png() -> Option<String> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let mut buf = Vec::new();
+    let mut enc = png::Encoder::new(&mut buf, img.width as u32, img.height as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().ok()?.write_image_data(&img.bytes).ok()?;
+    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(buf)))
+}
+
+// ---------- comandos com / do Claude Code ----------
+
+#[derive(Serialize, Debug)]
+pub struct SlashCmd {
+    pub name: String,
+    pub description: String,
+    pub skill: bool,
+}
+
+/// Uma linha de uso do plano, como o `/cost` mostra: "Current session: 51% used · resets Nov 25, 6pm (…)".
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Usage {
+    pub label: String,
+    pub percent: u32,
+    pub resets: String,
+}
+
+pub fn parse_usage(text: &str) -> Vec<Usage> {
+    text.lines()
+        .filter_map(|l| {
+            let (label, rest) = l.trim().split_once(':')?;
+            let (pct, rest) = rest.split_once("% used")?;
+            let resets = rest.split_once("resets ").map(|(_, r)| r.split(" (").next().unwrap_or(r).trim().to_string()).unwrap_or_default();
+            Some(Usage { label: label.trim().into(), percent: pct.trim().parse().ok()?, resets })
+        })
+        .collect()
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct ClaudeInfo {
+    pub commands: Vec<SlashCmd>,
+    /// Modelo configurado no Claude Code (`~/.claude/settings.json` ou o padrão da conta).
+    pub model: Option<String>,
+    pub user_skills: Vec<crate::settings::UserSkill>,
+    pub plugins: Vec<crate::settings::Plugin>,
+    pub mcps: Vec<crate::settings::Mcp>,
+    pub usage: Vec<Usage>,
+}
+
+/// Pede ao Claude Code a lista de comandos e skills. Manda `/cost`, que roda local e não gasta nada;
+/// a lista vem na linha `init` do stream.
+/// Roda `/cost` no Claude Code (local, não gasta nada). Devolve a linha `init` e o texto do resultado.
+fn claude_cost(workdir: &Path) -> (Option<Value>, String) {
+    let Some(bin) = find("claude") else { return (None, String::new()) };
+    let Ok(mut child) = command(&bin)
+        .args(["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence"])
+        .current_dir(workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return (None, String::new());
+    };
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"/cost");
+    }
+    let (mut init, mut result) = (None, String::new());
+    for v in BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()) {
+        if v["subtype"] == "init" {
+            init = Some(v);
+        } else if v["type"] == "result" {
+            result = v["result"].as_str().unwrap_or("").to_string();
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    (init, result)
+}
+
+pub fn claude_usage(workdir: &Path) -> Vec<Usage> {
+    parse_usage(&claude_cost(workdir).1)
+}
+
+pub fn claude_commands(workdir: &Path) -> ClaudeInfo {
+    let (init, result) = claude_cost(workdir);
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+    init.map(|v| ClaudeInfo {
+        commands: slash_list(&v, &home),
+        model: v["model"].as_str().map(String::from),
+        user_skills: crate::settings::user_skills(&home),
+        plugins: crate::settings::plugins(&home, &v),
+        mcps: crate::settings::mcps(&v),
+        usage: parse_usage(&result),
+    })
+    .unwrap_or_default()
+}
+
+/// Skills e comandos de plugin, com a descrição do próprio arquivo. Dos comandos internos,
+/// só os que fazem sentido fora do terminal.
+fn slash_list(init: &Value, home: &Path) -> Vec<SlashCmd> {
+    const BUILTIN: [(&str, &str); 3] = [
+        ("compact", "Resume a conversa até aqui para liberar espaço no contexto"),
+        ("context", "Mostra quanto do contexto da conversa já está em uso"),
+        ("usage", "Mostra o uso do seu plano"),
+    ];
+    let strs = |k: &str| -> Vec<String> {
+        init[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let skills = strs("skills");
+    let terminal = strs("terminal_slash_commands");
+    let plugins: std::collections::HashMap<&str, PathBuf> = init["plugins"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| Some((p["name"].as_str()?, PathBuf::from(p["path"].as_str()?)))).collect())
+        .unwrap_or_default();
+    strs("slash_commands")
+        .into_iter()
+        .filter(|n| !terminal.contains(n) && !n.starts_with('_'))
+        .filter_map(|name| {
+            let files = match name.split_once(':') {
+                Some((p, s)) => plugins
+                    .get(p)
+                    .map(|d| vec![d.join("skills").join(s).join("SKILL.md"), d.join("commands").join(format!("{s}.md"))])
+                    .unwrap_or_default(),
+                None => vec![
+                    home.join(".claude").join("skills").join(&name).join("SKILL.md"),
+                    home.join(".claude").join("commands").join(format!("{name}.md")),
+                ],
+            };
+            let found = files.iter().find_map(|f| std::fs::read_to_string(f).ok()).map(|s| description(&s));
+            let builtin = BUILTIN.iter().find(|(b, _)| *b == name).map(|(_, d)| d.to_string());
+            let description = found.or(builtin.clone()).unwrap_or_default();
+            let skill = skills.contains(&name);
+            (skill || !description.is_empty()).then_some(SlashCmd { name, description, skill })
+        })
+        .collect()
+}
+
+/// `description:` do frontmatter YAML, em uma linha ou em bloco (`>` / `|`).
+pub fn description(md: &str) -> String {
+    let Some((fm, _)) = md.trim_start().strip_prefix("---").and_then(|r| r.split_once("\n---")) else {
+        return String::new();
+    };
+    let mut it = fm.lines();
+    while let Some(l) = it.next() {
+        if let Some(v) = l.strip_prefix("description:") {
+            let v = v.trim();
+            let text = if v.is_empty() || v.starts_with(['>', '|']) {
+                it.by_ref().take_while(|l| l.starts_with([' ', '\t'])).map(str::trim).collect::<Vec<_>>().join(" ")
+            } else {
+                v.to_string()
+            };
+            return text.trim_matches(['"', '\'']).to_string();
+        }
+    }
+    String::new()
+}
+
+// ---------- detalhes de um modelo do Ollama ----------
+
+#[derive(Serialize, Default)]
+pub struct OllamaInfo {
+    pub family: String,
+    pub parameters: String,
+    pub quantization: String,
+    pub context: Option<u64>,
+    pub capabilities: Vec<String>,
+    pub size: Option<u64>,
+}
+
+pub fn ollama_info(model: &str) -> OllamaInfo {
+    let show = ureq::post(&format!("{OLLAMA}/api/show"))
+        .timeout(Duration::from_secs(4))
+        .send_string(&json!({ "model": model }).to_string())
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null);
+    let d = &show["details"];
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let size = http_get("/api/tags")
+        .and_then(|t| t["models"].as_array()?.iter().find(|m| m["name"] == model)?["size"].as_u64());
+    OllamaInfo {
+        family: s(&d["family"]),
+        parameters: s(&d["parameter_size"]),
+        quantization: s(&d["quantization_level"]),
+        context: show["model_info"]
+            .as_object()
+            .and_then(|o| o.iter().find(|(k, _)| k.ends_with(".context_length")).and_then(|(_, v)| v.as_u64())),
+        capabilities: show["capabilities"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default(),
+        size,
+    }
 }
 
 // ---------- conversar ----------
@@ -220,11 +470,15 @@ pub fn run(
     text: &str,
     images: &[String],
     session: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    opts: &AiOptions,
     running: &Running,
     out: &mut dyn FnMut(Out),
 ) {
+    let effort = effort.filter(|e| effort_levels(ai).contains(e));
     if ai.kind == "ollama" {
-        return ollama(ai, workdir, history, text, images, running, out);
+        return ollama(ai, workdir, history, text, images, effort, opts, running, out);
     }
     let Some(bin) = find(&ai.kind) else {
         return out(Out::Error(format!("Não achei o comando `{}` neste PC. Clique em procurar de novo.", ai.kind)));
@@ -236,6 +490,15 @@ pub fn run(
             cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
             if let Some(s) = session {
                 cmd.args(["--resume", s]);
+            }
+            if let Some(m) = model {
+                cmd.args(["--model", m]);
+            }
+            if let Some(e) = effort {
+                cmd.args(["--effort", e]);
+            }
+            if !opts.system.trim().is_empty() {
+                cmd.args(["--append-system-prompt", opts.system.trim()]);
             }
             if !images.is_empty() {
                 prompt.push_str("\n\nImagens anexadas nesta pasta (leia os arquivos): ");
@@ -254,6 +517,9 @@ pub fn run(
             cmd.args(["exec", "--json", "--skip-git-repo-check", "-s", "read-only"]);
             for i in images {
                 cmd.args(["-i", i]);
+            }
+            if let Some(e) = effort {
+                cmd.args(["-c", &format!("model_reasoning_effort={e}")]);
             }
             if let Some(s) = session {
                 cmd.args(["resume", s]);
@@ -393,7 +659,18 @@ fn parse_line(kind: &str, line: &str, has_text: bool) -> Vec<Out> {
     out
 }
 
-fn ollama(ai: &Ai, workdir: &Path, history: &[Msg], text: &str, images: &[String], running: &Running, out: &mut dyn FnMut(Out)) {
+#[allow(clippy::too_many_arguments)]
+fn ollama(
+    ai: &Ai,
+    workdir: &Path,
+    history: &[Msg],
+    text: &str,
+    images: &[String],
+    effort: Option<&str>,
+    opts: &AiOptions,
+    running: &Running,
+    out: &mut dyn FnMut(Out),
+) {
     let b64 = |names: &[String]| -> Vec<String> {
         names
             .iter()
@@ -401,13 +678,30 @@ fn ollama(ai: &Ai, workdir: &Path, history: &[Msg], text: &str, images: &[String
             .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
             .collect()
     };
-    let mut messages: Vec<Value> = history
+    let mut messages: Vec<Value> = Vec::new();
+    if !opts.system.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": opts.system.trim() }));
+    }
+    messages.extend(history
         .iter()
         .filter(|m| !m.error)
-        .map(|m| json!({ "role": m.role, "content": m.text, "images": b64(&m.images) }))
-        .collect();
+        .map(|m| json!({ "role": m.role, "content": m.text, "images": b64(&m.images) })));
     messages.push(json!({ "role": "user", "content": text, "images": b64(images) }));
-    let body = json!({ "model": ai.model, "messages": messages, "stream": true }).to_string();
+    let mut options = serde_json::Map::new();
+    if let Some(t) = opts.temperature {
+        options.insert("temperature".into(), json!(t));
+    }
+    if let Some(n) = opts.num_ctx {
+        options.insert("num_ctx".into(), json!(n));
+    }
+    let mut body = json!({ "model": ai.model, "messages": messages, "stream": true, "options": options });
+    match effort {
+        Some("off") => body["think"] = json!(false),
+        Some("on") => body["think"] = json!(true),
+        Some(level) => body["think"] = json!(level),
+        None => {}
+    }
+    let body = body.to_string();
     let resp = match ureq::post(&format!("{OLLAMA}/api/chat")).send_string(&body) {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => {
@@ -478,6 +772,84 @@ mod tests {
         let shim = "@ECHO off\r\nSET dp0=%~dp0\r\n\"%_prog%\"  \"%dp0%\\node_modules\\@google\\gemini-cli\\dist\\index.js\" %*\r\n";
         assert_eq!(cmd_shim_script(shim).as_deref(), Some("node_modules\\@google\\gemini-cli\\dist\\index.js"));
         assert_eq!(cmd_shim_script("\"%dp0%\\node.exe\" %*"), None);
+    }
+
+    #[test]
+    fn slash_commands() {
+        assert_eq!(description("---\nname: a\ndescription: Faz X\n---\n# A"), "Faz X");
+        assert_eq!(description("---\ndescription: >\n  linha um\n  linha dois\nname: a\n---\n"), "linha um linha dois");
+        assert_eq!(description("---\ndescription: \"com aspas\"\n---"), "com aspas");
+        assert_eq!(description("# sem frontmatter"), "");
+
+        let dir = std::env::temp_dir().join(format!("orbia-teste-{}", std::process::id()));
+        let plug = dir.join("plug");
+        std::fs::create_dir_all(dir.join(".claude/skills/minha")).unwrap();
+        std::fs::create_dir_all(plug.join("commands")).unwrap();
+        std::fs::write(dir.join(".claude/skills/minha/SKILL.md"), "---\ndescription: Minha skill\n---\n").unwrap();
+        std::fs::write(plug.join("commands/cmd.md"), "---\ndescription: Do plugin\n---\n").unwrap();
+        let init = json!({
+            "slash_commands": ["minha", "p:cmd", "compact", "clear", "color", "__interno", "sem-arquivo"],
+            "skills": ["minha", "sem-arquivo"],
+            "terminal_slash_commands": ["color"],
+            "plugins": [{ "name": "p", "path": plug.to_str().unwrap() }],
+        });
+        let got: Vec<(String, String, bool)> = slash_list(&init, &dir).into_iter().map(|c| (c.name, c.description, c.skill)).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            got,
+            [
+                ("minha".into(), "Minha skill".into(), true),
+                ("p:cmd".into(), "Do plugin".into(), false),
+                ("compact".into(), "Resume a conversa até aqui para liberar espaço no contexto".into(), false),
+                ("sem-arquivo".into(), String::new(), true),
+            ]
+        );
+    }
+
+    /// Manual: `cargo test -- --ignored --nocapture` com o Claude Code instalado.
+    #[test]
+    #[ignore]
+    fn claude_real() {
+        let dir = std::env::temp_dir();
+        let info = claude_commands(&dir);
+        println!("modelo: {:?}", info.model);
+        println!("uso: {:?}", info.usage);
+        let cmds = info.commands;
+        for c in &cmds {
+            println!("/{} — {}", c.name, c.description.chars().take(70).collect::<String>());
+        }
+        assert!(!cmds.is_empty());
+    }
+
+    /// Manual: copie uma imagem e rode `cargo test clipboard_real -- --ignored`.
+    #[test]
+    #[ignore]
+    fn clipboard_real() {
+        let url = clipboard_png().expect("sem imagem na área de transferência");
+        let png = base64::engine::general_purpose::STANDARD.decode(url.trim_start_matches("data:image/png;base64,")).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn usage_and_effort() {
+        let text = "You are currently using your subscription\n\nCurrent session: 51% used · resets Nov 25, 6pm (America/Sao_Paulo)\nCurrent week (all models): 19% used · resets Nov 28, 11pm (America/Sao_Paulo)\n\nLast 24h · 211 requests · 9 sessions\n  68%  Start fresh";
+        assert_eq!(
+            parse_usage(text),
+            [
+                Usage { label: "Current session".into(), percent: 51, resets: "Nov 25, 6pm".into() },
+                Usage { label: "Current week (all models)".into(), percent: 19, resets: "Nov 28, 11pm".into() },
+            ]
+        );
+        assert!(parse_usage("Total cost: $0.12").is_empty());
+
+        let ai = |kind: &str, model: Option<&str>, think: bool| Ai {
+            id: "x".into(), kind: kind.into(), model: model.map(String::from), label: "x".into(), images: false, think,
+        };
+        assert_eq!(effort_levels(&ai("claude", None, false)).len(), 5);
+        assert_eq!(effort_levels(&ai("ollama", Some("gpt-oss:20b"), true)), ["off", "low", "medium", "high"]);
+        assert_eq!(effort_levels(&ai("ollama", Some("qwen3"), true)), ["off", "on"]);
+        assert!(effort_levels(&ai("ollama", Some("llama3.2"), false)).is_empty());
+        assert!(effort_levels(&ai("gemini", None, false)).is_empty());
     }
 
     #[test]

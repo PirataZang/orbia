@@ -29,7 +29,7 @@ Ao abrir, e toda vez que você clica no botão de procurar de novo, o Orbia proc
 | **Gemini CLI** | o comando `gemini`, já logado | Gemini | sim |
 | **Codex** | o comando `codex`, já logado | Codex | sim |
 
-Se o Ollama estiver instalado mas parado, o Orbia inicia o `ollama serve` em segundo plano. Os CLIs instalados pelo npm, pelo nvm ou pelo bun aparecem mesmo quando o app é aberto pelo menu, que não lê o PATH do seu `.bashrc`.
+Se o Ollama estiver instalado mas parado, o Orbia inicia o `ollama serve` em segundo plano. Com o Claude, digitar `/` abre a lista das suas skills e comandos, com a descrição de cada um, igual no terminal. Os CLIs instalados pelo npm, pelo nvm ou pelo bun aparecem mesmo quando o app é aberto pelo menu, que não lê o PATH do seu `.bashrc`.
 
 <table>
   <tr>
@@ -44,11 +44,21 @@ Se o Ollama estiver instalado mas parado, o Orbia inicia o `ollama serve` em seg
 
 ## Quatro temas
 
-Roxo é o padrão. Azul segue a mesma estrutura puxada para o azul, Branco é para usar de dia e Preto usa cinzas sem cor nenhuma. A troca fica nos círculos do canto superior direito e o app lembra a escolha.
+Roxo é o padrão. Azul segue a mesma estrutura puxada para o azul, Branco é para usar de dia e Preto usa cinzas sem cor nenhuma. A troca fica na engrenagem do canto superior direito, aba Geral, e o app lembra a escolha.
 
 <p align="center">
   <img src="docs/assets/temas.png" alt="A mesma conversa nos temas Roxo, Azul, Branco e Preto" width="100%">
 </p>
+
+## Configurações
+
+A engrenagem abre as configurações da IA da conversa atual; ao trocar de IA na barra lateral, a tela troca junto.
+
+- **Claude:** modelo e esforço padrão (de low a max), uma instrução extra só para as conversas no Orbia, suas skills (criar, editar, apagar), plugins (instalar, ativar e desativar), MCPs (ver o status, adicionar e remover) e as regras do `~/.claude/CLAUDE.md`. As mudanças valem também no terminal. Antes de salvar um arquivo, o Orbia guarda uma cópia `.bak`.
+- **Ollama:** detalhes de cada modelo, instrução de sistema, temperatura e tamanho do contexto. Ficam guardados no Orbia.
+- **Codex:** esforço padrão.
+
+Durante a conversa, o botão ⌘ ao lado do clipe troca o modelo e o esforço daquela conversa e roda comandos como `/compact` e `/context` com um clique. Com o Claude, o rodapé da barra lateral mostra quanto do plano já foi usado na sessão e na semana, e quanto falta para zerar.
 
 ## Baixar e abrir
 
