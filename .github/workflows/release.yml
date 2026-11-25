@@ -1,5 +1,8 @@
 name: release
 
+# Publicar uma tag vX.Y.Z (igual à "version" de src-tauri/tauri.conf.json) gera a release
+# com o AppImage e o .exe anexados. Rodar à mão (workflow_dispatch) só gera os arquivos.
+
 on:
   push:
     tags: ["v*"]
@@ -17,11 +20,12 @@ jobs:
           # AppImage só roda com glibc igual ou mais nova que a de onde foi gerado.
           - os: ubuntu-22.04
             args: --bundles appimage
-            file: src-tauri/target/release/bundle/appimage/*.AppImage
           - os: windows-latest
             args: --no-bundle
-            file: src-tauri/target/release/orbia.exe
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -44,12 +48,50 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npx tauri build ${{ matrix.args }}
 
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: ${{ matrix.file }}
+      - name: Separar o arquivo da release
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          mkdir out
+          if [ "$RUNNER_OS" = Linux ]; then
+            cp src-tauri/target/release/bundle/appimage/*.AppImage "out/Orbia_${version}_amd64.AppImage"
+          else
+            cp src-tauri/target/release/orbia.exe "out/Orbia_${version}_x64.exe"
+          fi
+          ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
           name: orbia-${{ runner.os }}
-          path: ${{ matrix.file }}
+          path: out/*
+          if-no-files-found: error
+
+  # Só roda se Linux e Windows deram certo: a release sai sempre com os dois arquivos.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir a tag com a versão do app
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::A tag $GITHUB_REF_NAME não bate com a versão $version de src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - run: ls -la out
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.AppImage
+            out/*.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
