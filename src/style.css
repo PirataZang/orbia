@@ -524,6 +524,27 @@ h2 {
   gap: 8px;
   justify-content: flex-end;
 }
+.img-btn {
+  display: block;
+  padding: 0;
+  border-radius: 12px;
+  cursor: zoom-in;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.img-btn:hover {
+  opacity: 0.9;
+}
+.img-btn:active {
+  transform: scale(0.98);
+}
+.img-btn:focus-visible {
+  border-radius: 12px;
+}
+.thumb .img-btn {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+}
 .imgs img {
   display: block;
   max-width: 220px;
@@ -2041,4 +2062,195 @@ output {
 .usage .icon-btn.small {
   width: 22px;
   height: 22px;
+}
+
+/* ---------- raciocínio (think) ---------- */
+
+.answer > :first-child {
+  margin-top: 0;
+}
+.answer > :last-child {
+  margin-bottom: 0;
+}
+.reasoning {
+  margin: 0 0 12px;
+  border-left: 1px solid var(--line);
+  padding-left: 12px;
+}
+.reasoning summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  list-style: none;
+  user-select: none;
+}
+.reasoning summary::-webkit-details-marker {
+  display: none;
+}
+.reasoning summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+.reasoning[open] summary::before {
+  transform: rotate(45deg);
+}
+.reasoning summary:hover {
+  color: var(--text);
+}
+.reasoning-body {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.think-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 4px 2px;
+}
+
+/* ---------- opções avançadas do Ollama ---------- */
+
+.adv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 20px;
+}
+.adv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.adv-field .p-desc {
+  flex: 1;
+}
+.adv-field .s-select,
+.adv-field .s-input {
+  width: 100%;
+  margin: 4px 0 0;
+}
+.adv-field .switch {
+  margin-top: 6px;
+}
+@media (max-width: 900px) {
+  .adv {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- visualizador de imagem ---------- */
+
+.viewer {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+}
+.viewer::backdrop {
+  background: oklch(0.08 0.01 292 / 0.88);
+  backdrop-filter: blur(6px);
+}
+.viewer[open] {
+  animation: fade 0.18s ease-out;
+}
+.viewer[open] .viewer-stage img {
+  animation: pop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+.viewer-stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  overflow: auto;
+  padding: 56px 72px;
+  cursor: zoom-out;
+}
+.viewer-stage img {
+  margin: auto; /* centraliza; maior que a tela, começa do canto e rola */
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 30px 80px -30px oklch(0 0 0 / 0.8);
+  cursor: zoom-in;
+}
+.viewer-stage.real {
+  padding: 24px;
+}
+.viewer-stage.real img {
+  max-width: none;
+  max-height: none;
+  border-radius: 4px;
+  cursor: zoom-out;
+}
+.viewer-btn {
+  position: fixed;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: oklch(0.25 0.01 292 / 0.75);
+  color: oklch(0.96 0 0);
+  font-size: 20px;
+  line-height: 1;
+  transition: background 0.15s;
+  z-index: 2;
+}
+.viewer-btn:hover {
+  background: oklch(0.32 0.02 292 / 0.9);
+}
+.viewer-close {
+  top: 16px;
+  right: 16px;
+  font-size: 15px;
+}
+.viewer-prev,
+.viewer-next {
+  top: 50%;
+  translate: 0 -50%;
+  font-size: 28px;
+}
+.viewer-prev {
+  left: 16px;
+}
+.viewer-next {
+  right: 16px;
+}
+.viewer-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  translate: -50% 0;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: oklch(0.2 0.01 292 / 0.7);
+  font-size: 12px;
+  color: oklch(0.85 0.01 292);
+  white-space: nowrap;
+  pointer-events: none;
 }

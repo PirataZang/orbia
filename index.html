@@ -61,6 +61,14 @@
       </main>
     </div>
 
+    <dialog class="viewer" id="viewer" aria-label="Imagem ampliada">
+      <div class="viewer-stage" id="viewer-stage"><img id="viewer-img" alt="" /></div>
+      <button type="button" class="viewer-btn viewer-close" id="viewer-close" aria-label="Fechar"></button>
+      <button type="button" class="viewer-btn viewer-prev" id="viewer-prev" aria-label="Imagem anterior"></button>
+      <button type="button" class="viewer-btn viewer-next" id="viewer-next" aria-label="Próxima imagem"></button>
+      <p class="viewer-hint" id="viewer-hint"></p>
+    </dialog>
+
     <dialog class="confirm" id="confirm" aria-labelledby="confirm-title">
       <form method="dialog">
         <h2 id="confirm-title">Apagar esta conversa?</h2>

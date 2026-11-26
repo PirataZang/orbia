@@ -51,6 +51,25 @@ pub struct AiOptions {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub num_ctx: Option<u32>,
+    // Opções avançadas do Ollama (`options` e campos de `/api/chat`). None = padrão do modelo.
+    #[serde(default)]
+    pub num_predict: Option<i32>,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub min_p: Option<f64>,
+    #[serde(default)]
+    pub repeat_penalty: Option<f64>,
+    /// Quanto tempo o modelo fica na memória depois de responder: "0", "30m", "1h", "-1" (sempre).
+    #[serde(default)]
+    pub keep_alive: Option<String>,
+    /// Pede a resposta em JSON (`format: "json"`).
+    #[serde(default)]
+    pub json: bool,
 }
 
 impl AiOptions {
@@ -66,6 +85,12 @@ impl AiOptions {
         }
         self.temperature = self.temperature.map(|t| t.clamp(0.0, 2.0));
         self.num_ctx = self.num_ctx.filter(|n| (1024..=262_144).contains(n));
+        self.num_predict = self.num_predict.filter(|n| *n == -1 || (1..=131_072).contains(n));
+        self.top_k = self.top_k.filter(|n| (1..=1000).contains(n));
+        self.top_p = self.top_p.map(|v| v.clamp(0.0, 1.0));
+        self.min_p = self.min_p.map(|v| v.clamp(0.0, 1.0));
+        self.repeat_penalty = self.repeat_penalty.map(|v| v.clamp(0.0, 3.0));
+        self.keep_alive = self.keep_alive.filter(|k| ["0", "5m", "30m", "1h", "-1"].contains(&k.as_str()));
         Ok(self)
     }
 }
@@ -84,6 +109,8 @@ pub struct Msg {
     pub images: Vec<String>,
     #[serde(default)]
     pub error: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub thinking: String,
 }
 
 /// Processo em andamento; `stop()` o interrompe.
@@ -104,6 +131,8 @@ impl Running {
 
 pub enum Out {
     Text(String),
+    /// Raciocínio do modelo antes da resposta (Ollama com `think`, Claude com thinking).
+    Thinking(String),
     Session(String),
     Error(String),
 }
@@ -424,6 +453,39 @@ pub fn description(md: &str) -> String {
     String::new()
 }
 
+/// Corpo do `POST /api/chat` com as opções do Orbia para o modelo.
+fn ollama_body(ai: &Ai, messages: Vec<Value>, effort: Option<&str>, o: &AiOptions) -> Value {
+    let mut options = serde_json::Map::new();
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            options.insert(k.into(), v);
+        }
+    };
+    put("temperature", o.temperature.map(|v| json!(v)));
+    put("num_ctx", o.num_ctx.map(|v| json!(v)));
+    put("num_predict", o.num_predict.map(|v| json!(v)));
+    put("seed", o.seed.map(|v| json!(v)));
+    put("top_k", o.top_k.map(|v| json!(v)));
+    put("top_p", o.top_p.map(|v| json!(v)));
+    put("min_p", o.min_p.map(|v| json!(v)));
+    put("repeat_penalty", o.repeat_penalty.map(|v| json!(v)));
+    let mut body = json!({ "model": ai.model, "messages": messages, "stream": true, "options": options });
+    match effort {
+        Some("off") => body["think"] = json!(false),
+        Some("on") => body["think"] = json!(true),
+        Some(level) => body["think"] = json!(level),
+        None => {}
+    }
+    if let Some(k) = &o.keep_alive {
+        // Números viram segundos ("0" descarrega na hora, "-1" nunca descarrega); o resto é duração.
+        body["keep_alive"] = k.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| json!(k));
+    }
+    if o.json {
+        body["format"] = json!("json");
+    }
+    body
+}
+
 // ---------- detalhes de um modelo do Ollama ----------
 
 #[derive(Serialize, Default)]
@@ -620,7 +682,10 @@ fn parse_line(kind: &str, line: &str, has_text: bool) -> Vec<Out> {
                 Some("content_block_start") if s("/event/content_block/type").as_deref() == Some("text") && has_text => {
                     out.push(Out::Text("\n\n".into()))
                 }
-                Some("content_block_delta") => out.extend(s("/event/delta/text").map(Out::Text)),
+                Some("content_block_delta") => {
+                    out.extend(s("/event/delta/text").map(Out::Text));
+                    out.extend(s("/event/delta/thinking").map(Out::Thinking));
+                }
                 _ => {}
             },
             Some("result") => {
@@ -687,21 +752,7 @@ fn ollama(
         .filter(|m| !m.error)
         .map(|m| json!({ "role": m.role, "content": m.text, "images": b64(&m.images) })));
     messages.push(json!({ "role": "user", "content": text, "images": b64(images) }));
-    let mut options = serde_json::Map::new();
-    if let Some(t) = opts.temperature {
-        options.insert("temperature".into(), json!(t));
-    }
-    if let Some(n) = opts.num_ctx {
-        options.insert("num_ctx".into(), json!(n));
-    }
-    let mut body = json!({ "model": ai.model, "messages": messages, "stream": true, "options": options });
-    match effort {
-        Some("off") => body["think"] = json!(false),
-        Some("on") => body["think"] = json!(true),
-        Some(level) => body["think"] = json!(level),
-        None => {}
-    }
-    let body = body.to_string();
+    let body = ollama_body(ai, messages, effort, opts).to_string();
     let resp = match ureq::post(&format!("{OLLAMA}/api/chat")).send_string(&body) {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => {
@@ -720,7 +771,10 @@ fn ollama(
         if let Some(e) = v["error"].as_str() {
             return out(Out::Error(e.into()));
         }
-        if let Some(t) = v["message"]["content"].as_str() {
+        if let Some(t) = v["message"]["thinking"].as_str().filter(|t| !t.is_empty()) {
+            out(Out::Thinking(t.into()));
+        }
+        if let Some(t) = v["message"]["content"].as_str().filter(|t| !t.is_empty()) {
             out(Out::Text(t.into()));
         }
     }
@@ -735,6 +789,7 @@ mod tests {
             .map(|x| match x {
                 Out::Text(t) => format!("T:{t}"),
                 Out::Session(s) => format!("S:{s}"),
+                Out::Thinking(t) => format!("P:{t}"),
                 Out::Error(e) => format!("E:{e}"),
             })
             .collect()
@@ -750,6 +805,10 @@ mod tests {
         assert_eq!(texts(parse_line("claude", r#"{"type":"result","is_error":false,"result":"oi"}"#, true)), Vec::<String>::new());
         assert_eq!(texts(parse_line("claude", r#"{"type":"result","is_error":true,"result":"Not logged in"}"#, false)), ["E:Not logged in"]);
         assert_eq!(texts(parse_line("claude", r#"{"type":"assistant","message":{}}"#, false)), Vec::<String>::new());
+        assert_eq!(
+            texts(parse_line("claude", r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}"#, false)),
+            ["P:hmm"]
+        );
     }
 
     #[test]
@@ -850,6 +909,36 @@ mod tests {
         assert_eq!(effort_levels(&ai("ollama", Some("qwen3"), true)), ["off", "on"]);
         assert!(effort_levels(&ai("ollama", Some("llama3.2"), false)).is_empty());
         assert!(effort_levels(&ai("gemini", None, false)).is_empty());
+    }
+
+    #[test]
+    fn ollama_request() {
+        let ai = Ai { id: "o".into(), kind: "ollama".into(), model: Some("qwen3".into()), label: "qwen3".into(), images: false, think: true };
+        let plain = ollama_body(&ai, vec![], None, &AiOptions::default());
+        assert_eq!(plain["options"], json!({}));
+        assert!(plain.get("think").is_none() && plain.get("keep_alive").is_none() && plain.get("format").is_none());
+
+        let o = AiOptions {
+            temperature: Some(0.2),
+            num_predict: Some(-1),
+            seed: Some(42),
+            top_k: Some(40),
+            top_p: Some(0.9),
+            repeat_penalty: Some(1.1),
+            keep_alive: Some("-1".into()),
+            json: true,
+            ..Default::default()
+        };
+        let b = ollama_body(&ai, vec![], Some("off"), &o);
+        assert_eq!(b["think"], json!(false));
+        assert_eq!(b["keep_alive"], json!(-1));
+        assert_eq!(b["format"], json!("json"));
+        assert_eq!(b["options"], json!({ "temperature": 0.2, "num_predict": -1, "seed": 42, "top_k": 40, "top_p": 0.9, "repeat_penalty": 1.1 }));
+        assert_eq!(ollama_body(&ai, vec![], Some("high"), &AiOptions { keep_alive: Some("30m".into()), ..Default::default() })["keep_alive"], json!("30m"));
+        assert_eq!(ollama_body(&ai, vec![], Some("on"), &AiOptions::default())["think"], json!(true));
+
+        let v = AiOptions { top_k: Some(0), top_p: Some(5.0), keep_alive: Some("99d".into()), num_predict: Some(-7), ..Default::default() }.validate().unwrap();
+        assert_eq!((v.top_k, v.top_p, v.keep_alive, v.num_predict), (None, Some(1.0), None, None));
     }
 
     #[test]

@@ -55,7 +55,7 @@ Roxo é o padrão. Azul segue a mesma estrutura puxada para o azul, Branco é pa
 A engrenagem abre as configurações da IA da conversa atual; ao trocar de IA na barra lateral, a tela troca junto.
 
 - **Claude:** modelo e esforço padrão (de low a max), uma instrução extra só para as conversas no Orbia, suas skills (criar, editar, apagar), plugins (instalar, ativar e desativar), MCPs (ver o status, adicionar e remover) e as regras do `~/.claude/CLAUDE.md`. As mudanças valem também no terminal. Antes de salvar um arquivo, o Orbia guarda uma cópia `.bak`.
-- **Ollama:** detalhes de cada modelo, instrução de sistema, temperatura e tamanho do contexto. Ficam guardados no Orbia.
+- **Ollama:** detalhes de cada modelo, pensar antes de responder (`think` ligado ou desligado; níveis no gpt-oss), instrução de sistema, temperatura, tamanho do contexto e opções avançadas (tamanho máximo da resposta, tempo na memória, semente, top-k, top-p, min-p, penalidade de repetição, resposta em JSON). Ficam guardados no Orbia. Com o pensar ligado, o raciocínio do modelo aparece recolhido acima da resposta.
 - **Codex:** esforço padrão.
 
 Durante a conversa, o botão ⌘ ao lado do clipe troca o modelo e o esforço daquela conversa e roda comandos como `/compact` e `/context` com um clique. Com o Claude, o rodapé da barra lateral mostra quanto do plano já foi usado na sessão e na semana, e quanto falta para zerar.

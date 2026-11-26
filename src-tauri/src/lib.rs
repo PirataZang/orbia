@@ -43,6 +43,7 @@ struct Upload {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Ev {
     Delta { text: String },
+    Thinking { text: String },
     Error { text: String },
     Done,
 }
@@ -309,7 +310,7 @@ fn send(
     conv.model = model.filter(|m| ["opus", "sonnet", "haiku"].contains(&m.as_str()));
     conv.effort = effort.filter(|e| tools::effort_levels(&conv.ai).contains(&e.as_str()));
     let history = conv.messages.clone();
-    conv.messages.push(Msg { role: "user".into(), text: text.clone(), images: names.clone(), error: false });
+    conv.messages.push(Msg { role: "user".into(), text: text.clone(), images: names.clone(), error: false, thinking: String::new() });
     conv.updated = now() as u64;
     write_conv(&app, &conv)?;
 
@@ -318,12 +319,17 @@ fn send(
     runs.0.lock().unwrap().insert(id.clone(), running.clone());
     std::thread::spawn(move || {
         let mut reply = String::new();
+        let mut thinking = String::new();
         let mut error: Option<String> = None;
         let mut session = conv.session.clone();
         tools::run(&conv.ai, &dir, &history, &text, &names, session.clone().as_deref(), conv.model.as_deref(), conv.effort.as_deref(), &opts, &running, &mut |o| match o {
             Out::Text(t) => {
                 reply.push_str(&t);
                 let _ = on_event.send(Ev::Delta { text: t });
+            }
+            Out::Thinking(t) => {
+                thinking.push_str(&t);
+                let _ = on_event.send(Ev::Thinking { text: t });
             }
             Out::Session(s) => session = Some(s),
             Out::Error(e) => {
@@ -332,8 +338,8 @@ fn send(
             }
         });
         conv.session = session;
-        if !reply.is_empty() {
-            conv.messages.push(Msg { role: "assistant".into(), text: reply, ..Default::default() });
+        if !reply.is_empty() || !thinking.is_empty() {
+            conv.messages.push(Msg { role: "assistant".into(), text: reply, thinking, ..Default::default() });
         }
         if let Some(e) = error {
             conv.messages.push(Msg { role: "assistant".into(), text: e, error: true, ..Default::default() });

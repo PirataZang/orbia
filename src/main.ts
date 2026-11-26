@@ -9,11 +9,25 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 
 type Ai = { id: string; kind: string; model: string | null; label: string; images: boolean; think?: boolean };
-type Msg = { role: "user" | "assistant"; text: string; images: string[]; error?: boolean; streaming?: boolean };
+type Msg = { role: "user" | "assistant"; text: string; images: string[]; error?: boolean; streaming?: boolean; thinking?: string; showThinking?: boolean };
 type Conv = { id: string | null; ai: Ai; messages: Msg[]; busy?: boolean; model?: string | null; effort?: string | null };
 type Summary = { id: string; title: string; ai: string; kind: string; updated: number };
 type SlashCmd = { name: string; description: string; skill: boolean };
-type AiOptions = { model: string | null; effort: string | null; system: string; temperature: number | null; num_ctx: number | null };
+type AiOptions = {
+  model: string | null;
+  effort: string | null;
+  system: string;
+  temperature: number | null;
+  num_ctx: number | null;
+  num_predict: number | null;
+  seed: number | null;
+  top_k: number | null;
+  top_p: number | null;
+  min_p: number | null;
+  repeat_penalty: number | null;
+  keep_alive: string | null;
+  json: boolean;
+};
 type Usage = { label: string; percent: number; resets: string };
 type ClaudeInfo = {
   commands: SlashCmd[];
@@ -24,7 +38,7 @@ type ClaudeInfo = {
   usage: Usage[];
 };
 type OllamaInfo = { family: string; parameters: string; quantization: string; context: number | null; capabilities: string[]; size: number | null };
-type Ev = { type: "delta"; text: string } | { type: "error"; text: string } | { type: "done" };
+type Ev = { type: "delta"; text: string } | { type: "thinking"; text: string } | { type: "error"; text: string } | { type: "done" };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -82,6 +96,15 @@ function effortPicker(a: Ai, value: string | null | undefined): string {
   const levels = effortLevels(a);
   if (!levels.length) return "";
   const v = value ?? null;
+  if (levels.join() === "off,on") {
+    const on = v !== "off";
+    return `<div class="think-row"><button type="button" class="switch" role="switch" data-think="${on ? "off" : "on"}" aria-checked="${on}" aria-label="Pensar antes de responder"><i></i></button>
+      <div class="s-main"><span class="p-name">Pensar antes de responder</span><span class="p-desc">${
+        on
+          ? "Ligado (think=true): o modelo raciocina antes de responder. O raciocínio aparece recolhido acima da resposta."
+          : "Desligado (think=false): responde direto, mais rápido."
+      }</span></div></div>`;
+  }
   return `<div class="effort" role="radiogroup" aria-label="Esforço">
     <div class="effort-ends"><span>Mais rápido</span><span>Mais inteligente</span></div>
     <div class="effort-track" style="--n:${levels.length}">${levels
@@ -90,8 +113,14 @@ function effortPicker(a: Ai, value: string | null | undefined): string {
     <p class="effort-note">${v ? `${esc(EFFORT[v][1])} <button type="button" class="link" data-effort="">Usar o padrão</button>` : "Padrão: a própria ferramenta decide."}</p></div>`;
 }
 
+function effortLabel(a: Ai, e: string): string {
+  if (a.kind !== "ollama") return `esforço ${EFFORT[e]?.[0] ?? e}`;
+  return e === "on" || e === "off" ? `pensar ${EFFORT[e][0]}` : `raciocínio ${e}`;
+}
+
 function bindEffort(root: HTMLElement, onPick: (e: string | null) => void) {
   root.querySelectorAll<HTMLButtonElement>("[data-effort]").forEach((b) => (b.onclick = () => onPick(b.dataset.effort || null)));
+  root.querySelectorAll<HTMLButtonElement>("[data-think]").forEach((b) => (b.onclick = () => onPick(b.dataset.think!)));
 }
 const logo = (cls: string) => `<svg class="logo ${cls}" viewBox="0 0 100 100" aria-hidden="true"><use href="#saturno"/></svg>`;
 
@@ -255,12 +284,101 @@ function renderTop() {
   }
   els.title.innerHTML = current
     ? `<strong>${esc(current.ai.label)}</strong><span class="pill">${esc(KIND[current.ai.kind])} · ${
-        [current.model ? MODELS.find((m) => m.id === current!.model)?.name ?? current.model : "", current.effort ? `esforço ${EFFORT[current.effort]?.[0] ?? current.effort}` : ""]
+        [current.model ? MODELS.find((m) => m.id === current!.model)?.name ?? current.model : "", current.effort ? effortLabel(current.ai, current.effort) : ""]
           .filter(Boolean)
           .join(" · ") || (current.ai.kind === "ollama" ? "roda no seu PC" : "usa sua conta")
       }</span>`
     : "";
 }
+
+// ---------- visualizador de imagem ----------
+
+const viewer = {
+  el: $<HTMLDialogElement>("viewer"),
+  img: $<HTMLImageElement>("viewer-img"),
+  stage: $("viewer-stage"),
+  list: [] as string[],
+  i: 0,
+};
+
+/// Miniatura clicável: abre a imagem grande no visualizador.
+function imageButton(src: string, alt: string, open: () => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "img-btn";
+  b.setAttribute("aria-label", "Ver a imagem maior");
+  const img = new Image();
+  img.src = src;
+  img.alt = alt;
+  b.append(img);
+  b.onclick = open;
+  return b;
+}
+
+/// Ajusta a imagem para ocupar a tela inteira sem distorcer (amplia as pequenas também).
+function fitViewer() {
+  const { img, stage } = viewer;
+  if (stage.classList.contains("real") || !img.naturalWidth) {
+    img.style.width = img.style.height = "";
+    return;
+  }
+  const cs = getComputedStyle(stage);
+  const w = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const h = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const k = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+  img.style.width = `${Math.floor(img.naturalWidth * k)}px`;
+  img.style.height = `${Math.floor(img.naturalHeight * k)}px`;
+}
+viewer.img.onload = fitViewer;
+window.addEventListener("resize", () => viewer.el.open && fitViewer());
+
+function showViewer() {
+  const many = viewer.list.length > 1;
+  viewer.stage.classList.remove("real");
+  viewer.img.src = viewer.list[viewer.i];
+  fitViewer();
+  $("viewer-prev").hidden = $("viewer-next").hidden = !many;
+  $("viewer-hint").textContent = `${many ? `${viewer.i + 1} de ${viewer.list.length} · ← → trocam · ` : ""}Clique na imagem para ver no tamanho real · Esc fecha`;
+}
+
+function openViewer(list: string[], i: number) {
+  viewer.list = list;
+  viewer.i = i;
+  viewer.el.showModal();
+  showViewer(); // depois de abrir: o tamanho da área só existe com a janela aberta
+}
+
+function stepViewer(d: number) {
+  if (viewer.list.length < 2) return;
+  viewer.i = (viewer.i + d + viewer.list.length) % viewer.list.length;
+  showViewer();
+}
+
+viewer.img.onclick = (e) => {
+  e.stopPropagation();
+  // Tamanho real: centraliza a rolagem no ponto clicado, para o zoom cair onde a pessoa olhava.
+  const r = viewer.img.getBoundingClientRect();
+  const fx = (e.clientX - r.left) / r.width;
+  const fy = (e.clientY - r.top) / r.height;
+  const real = viewer.stage.classList.toggle("real");
+  fitViewer();
+  if (real) {
+    const st = viewer.stage;
+    st.scrollLeft = fx * st.scrollWidth - st.clientWidth / 2;
+    st.scrollTop = fy * st.scrollHeight - st.clientHeight / 2;
+  }
+};
+$("viewer-close").innerHTML = svg('<path d="M6 6l12 12M18 6 6 18"/>', 18);
+$("viewer-prev").innerHTML = svg('<path d="M15 18l-6-6 6-6"/>', 22);
+$("viewer-next").innerHTML = svg('<path d="m9 18 6-6-6-6"/>', 22);
+viewer.stage.onclick = () => viewer.el.close(); // clique fora da imagem fecha
+$("viewer-close").onclick = () => viewer.el.close();
+$("viewer-prev").onclick = () => stepViewer(-1);
+$("viewer-next").onclick = () => stepViewer(1);
+viewer.el.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft") stepViewer(-1);
+  if (e.key === "ArrowRight") stepViewer(1);
+});
 
 function msgEl(m: Msg): HTMLElement {
   const el = document.createElement("article");
@@ -268,12 +386,7 @@ function msgEl(m: Msg): HTMLElement {
   if (m.images.length) {
     const g = document.createElement("div");
     g.className = "imgs";
-    for (const src of m.images) {
-      const img = new Image();
-      img.src = src;
-      img.alt = "Imagem anexada";
-      g.append(img);
-    }
+    m.images.forEach((src, i) => g.append(imageButton(src, "Imagem anexada", () => openViewer(m.images, i))));
     el.append(g);
   }
   const body = document.createElement("div");
@@ -290,11 +403,21 @@ function fillBody(body: HTMLElement, m: Msg) {
   } else if (m.role === "user") {
     body.textContent = m.text;
   } else {
-    body.innerHTML = md(m.text);
-    decorateCode(body);
-    if (m.streaming) {
+    const thinkingNow = !!m.streaming && !m.text;
+    body.innerHTML = m.thinking
+      ? `<details class="reasoning"${m.showThinking ?? thinkingNow ? " open" : ""}><summary>${thinkingNow ? "Pensando…" : "Raciocínio"}</summary><div class="reasoning-body"></div></details><div class="answer"></div>`
+      : `<div class="answer"></div>`;
+    const details = body.querySelector<HTMLDetailsElement>(".reasoning");
+    if (details) {
+      body.querySelector(".reasoning-body")!.textContent = m.thinking!;
+      details.ontoggle = () => (m.showThinking = details.open);
+    }
+    const answer = body.querySelector<HTMLElement>(".answer")!;
+    answer.innerHTML = md(m.text);
+    decorateCode(answer);
+    if (m.streaming && !(thinkingNow && m.thinking)) {
       const tail = m.text ? `<span class="caret"></span>` : `<span class="thinking"><i></i><i></i><i></i></span>`;
-      (body.lastElementChild && body.lastElementChild.tagName === "P" ? body.lastElementChild : body).insertAdjacentHTML("beforeend", tail);
+      (answer.lastElementChild && answer.lastElementChild.tagName === "P" ? answer.lastElementChild : answer).insertAdjacentHTML("beforeend", tail);
     }
   }
 }
@@ -407,9 +530,7 @@ function updateComposer() {
   pending.forEach((p, i) => {
     const d = document.createElement("div");
     d.className = "thumb";
-    const img = new Image();
-    img.src = p.data;
-    img.alt = "Anexo";
+    const img = imageButton(p.data, "Anexo", () => openViewer(pending.map((x) => x.data), i));
     const rm = document.createElement("button");
     rm.type = "button";
     rm.setAttribute("aria-label", "Remover anexo");
@@ -536,8 +657,9 @@ async function send() {
   };
   const ch = new Channel<Ev>();
   ch.onmessage = (ev) => {
-    if (ev.type === "delta") {
-      reply.text += ev.text;
+    if (ev.type === "delta" || ev.type === "thinking") {
+      if (ev.type === "delta") reply.text += ev.text;
+      else reply.thinking = (reply.thinking ?? "") + ev.text;
       if (!frame) frame = requestAnimationFrame(paint);
       return;
     }
@@ -546,7 +668,7 @@ async function send() {
     } else {
       reply.streaming = false;
       conv.busy = false;
-      if (!reply.text) conv.messages.splice(conv.messages.indexOf(reply), 1);
+      if (!reply.text && !reply.thinking) conv.messages.splice(conv.messages.indexOf(reply), 1);
       loadSummaries();
       if (conv.ai.kind === "claude") loadUsage();
     }
@@ -726,7 +848,22 @@ function closeSettings() {
 }
 
 function opts(): AiOptions {
-  return { model: null, effort: null, system: "", temperature: null, num_ctx: null, ...(current ? options[current.ai.id] : {}) };
+  return {
+    model: null,
+    effort: null,
+    system: "",
+    temperature: null,
+    num_ctx: null,
+    num_predict: null,
+    seed: null,
+    top_k: null,
+    top_p: null,
+    min_p: null,
+    repeat_penalty: null,
+    keep_alive: null,
+    json: false,
+    ...(current ? options[current.ai.id] : {}),
+  };
 }
 
 async function saveDefaultEffort(e: string | null) {
@@ -735,9 +872,10 @@ async function saveDefaultEffort(e: string | null) {
   renderTop();
 }
 
-async function saveOpts(patch: Partial<AiOptions>) {
+async function saveOpts(patch: Partial<AiOptions>): Promise<AiOptions | undefined> {
   if (!current) return;
   options[current.ai.id] = await invoke<AiOptions>("set_options", { aiId: current.ai.id, options: { ...opts(), ...patch } });
+  return options[current.ai.id];
 }
 
 /// Mostra o resultado de uma ação ao lado do botão.
@@ -832,11 +970,11 @@ async function tabModelo(body: HTMLElement) {
   const a = current!.ai;
   const o = opts();
   body.innerHTML = `<section class="s-card"><h3>${esc(a.label)}</h3><div class="facts" id="facts"><span class="muted">Lendo os detalhes do modelo…</span></div></section>
-    ${
+    <section class="s-card"><h3>Raciocínio (think)</h3>${
       effortLevels(a).length
-        ? `<section class="s-card"><h3>Raciocínio padrão</h3><p class="p-help">Este modelo sabe pensar antes de responder. Vale para as conversas novas; em cada conversa dá para trocar pelo botão ⌘.</p><div id="def-effort">${effortPicker(a, o.effort)}</div></section>`
-        : ""
-    }
+        ? `<p class="p-help">Vale para as conversas novas com este modelo. Em cada conversa dá para trocar pelo botão ⌘.</p><div id="def-effort">${effortPicker(a, o.effort)}</div>`
+        : `<p class="p-help">Este modelo não tem modo de raciocínio. Modelos como qwen3, deepseek-r1 e gpt-oss têm.</p>`
+    }</section>
     <section class="s-card"><h3>Instrução de sistema</h3><p class="p-help">Vai no começo de toda conversa com este modelo, como uma regra de comportamento.</p>
       <textarea class="s-text" id="opt-system" rows="4" placeholder="Ex.: Você é um assistente que responde em português, em poucas linhas."></textarea>
       <div class="s-row"><button type="button" class="btn-sm primary" id="save-system">Salvar</button><span class="s-status"></span></div></section>
@@ -844,7 +982,58 @@ async function tabModelo(body: HTMLElement) {
       <div class="s-row"><input type="range" id="opt-temp" min="0" max="2" step="0.1" aria-label="Temperatura"><output id="temp-out"></output>
       <button type="button" class="btn-sm" id="temp-reset">Usar o padrão do modelo</button></div></section>
     <section class="s-card"><h3>Memória da conversa (contexto)</h3><p class="p-help">Quanto texto o modelo consegue considerar de uma vez. Mais contexto usa mais memória RAM.</p>
-      <select class="s-select" id="opt-ctx" aria-label="Tamanho do contexto"></select><span class="s-status" id="ctx-status"></span></section>`;
+      <select class="s-select" id="opt-ctx" aria-label="Tamanho do contexto"></select><span class="s-status" id="ctx-status"></span></section>
+    <section class="s-card"><h3>Avançado</h3><p class="p-help">Em branco usa o padrão do modelo. Valem a partir da próxima mensagem.</p>
+      <div class="adv">
+        <label class="adv-field"><span class="p-name">Tamanho máximo da resposta</span><span class="p-desc">Em tokens. Corta respostas longas demais.</span>
+          <select class="s-select" data-opt="num_predict"><option value="">Padrão do modelo</option>${[256, 512, 1024, 2048, 4096, 8192]
+            .map((n) => `<option value="${n}">${n.toLocaleString("pt-BR")} tokens</option>`)
+            .join("")}<option value="-1">Sem limite</option></select></label>
+        <label class="adv-field"><span class="p-name">Manter na memória</span><span class="p-desc">Tempo que o modelo fica carregado depois de responder. Descarregar libera RAM; manter faz a próxima resposta começar mais rápido.</span>
+          <select class="s-select" data-opt="keep_alive"><option value="">Padrão (5 minutos)</option><option value="0">Descarregar logo depois de responder</option><option value="30m">30 minutos</option><option value="1h">1 hora</option><option value="-1">Sempre carregado</option></select></label>
+        <label class="adv-field"><span class="p-name">Semente (seed)</span><span class="p-desc">Com o mesmo número, a mesma pergunta tende a gerar a mesma resposta.</span>
+          <input class="s-input" type="number" step="1" data-opt="seed" placeholder="Aleatória"></label>
+        <label class="adv-field"><span class="p-name">Top K</span><span class="p-desc">Quantas palavras candidatas o modelo considera a cada passo. Menos deixa mais focado.</span>
+          <input class="s-input" type="number" min="1" max="1000" step="1" data-opt="top_k" placeholder="Padrão do modelo"></label>
+        <label class="adv-field"><span class="p-name">Top P</span><span class="p-desc">De 0 a 1. Limita as candidatas pela soma das chances. Menos deixa mais focado.</span>
+          <input class="s-input" type="number" min="0" max="1" step="0.05" data-opt="top_p" placeholder="Padrão do modelo"></label>
+        <label class="adv-field"><span class="p-name">Min P</span><span class="p-desc">De 0 a 1. Descarta candidatas muito improváveis.</span>
+          <input class="s-input" type="number" min="0" max="1" step="0.01" data-opt="min_p" placeholder="Padrão do modelo"></label>
+        <label class="adv-field"><span class="p-name">Penalidade de repetição</span><span class="p-desc">Acima de 1 evita que o modelo repita frases.</span>
+          <input class="s-input" type="number" min="0" max="3" step="0.05" data-opt="repeat_penalty" placeholder="Padrão do modelo"></label>
+        <div class="adv-field"><span class="p-name">Responder em JSON</span><span class="p-desc">Força a resposta a ser um JSON válido. Útil para usar o resultado em scripts.</span>
+          <button type="button" class="switch" role="switch" id="opt-json" aria-checked="${o.json}" aria-label="Responder em JSON"><i></i></button></div>
+      </div>
+      <div class="s-row"><button type="button" class="btn-sm" id="adv-reset">Restaurar padrões</button><span class="s-status" id="adv-status"></span></div></section>`;
+  const advStatus = body.querySelector("#adv-status");
+  body.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-opt]").forEach((el) => {
+    const key = el.dataset.opt as keyof AiOptions;
+    const cur = o[key];
+    el.value = cur == null ? "" : String(cur);
+    el.onchange = async () => {
+      const raw = el.value.trim();
+      const value = raw === "" ? null : key === "keep_alive" ? raw : Number(raw);
+      try {
+        const saved = await saveOpts({ [key]: value } as Partial<AiOptions>);
+        const got = saved?.[key];
+        el.value = got == null ? "" : String(got); // mostra o valor depois da validação
+        status(advStatus, "Salvo.", "ok");
+      } catch (err) {
+        status(advStatus, String(err), "err");
+      }
+    };
+  });
+  const jsonSw = body.querySelector<HTMLButtonElement>("#opt-json")!;
+  jsonSw.onclick = async () => {
+    const on = jsonSw.getAttribute("aria-checked") !== "true";
+    await saveOpts({ json: on });
+    jsonSw.setAttribute("aria-checked", String(on));
+    status(advStatus, "Salvo.", "ok");
+  };
+  body.querySelector<HTMLButtonElement>("#adv-reset")!.onclick = async () => {
+    await saveOpts({ num_predict: null, seed: null, top_k: null, top_p: null, min_p: null, repeat_penalty: null, keep_alive: null, json: false });
+    renderThread();
+  };
   const def = body.querySelector<HTMLElement>("#def-effort");
   if (def) bindEffort(def, (e) => saveDefaultEffort(e).then(() => renderThread()));
   const sys = body.querySelector<HTMLTextAreaElement>("#opt-system")!;
@@ -1172,7 +1361,8 @@ function resetDate(text: string): Date | null {
 
 function left(d: Date | null): string {
   if (!d) return "";
-  const min = Math.max(0, Math.round((d.getTime() - Date.now()) / 60000));
+  const min = Math.round((d.getTime() - Date.now()) / 60000);
+  if (min <= 0) return ""; // já zerou; a próxima atualização traz o novo horário
   if (min >= 1440) return `${Math.floor(min / 1440)}d ${Math.floor((min % 1440) / 60)}h`;
   if (min >= 60) return `${Math.floor(min / 60)}h ${min % 60}m`;
   return `${min}m`;
