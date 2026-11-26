@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/Tauri-2-2b2738?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
   <img src="https://img.shields.io/badge/Rust-backend-2b2738?style=flat-square&logo=rust&logoColor=white" alt="Backend em Rust">
   <img src="https://img.shields.io/badge/TypeScript-sem%20framework-2b2738?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript sem framework">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licen%C3%A7a-MIT-2b2738?style=flat-square" alt="Licença MIT"></a>
 </p>
 
 Quem tem Ollama, Claude Code, Gemini CLI ou Codex instalado conversa com eles pelo terminal: texto cru, `**` e `#` aparecendo na tela, nada de imagem. O Orbia é um app de desktop que acha essas ferramentas sozinho e abre a conversa numa tela de chat, com Markdown formatado, blocos de código com botão de copiar e imagens anexadas.
@@ -126,6 +127,10 @@ git tag v0.1.0 && git push --tags
 O GitHub Actions monta o AppImage num runner Ubuntu 22.04 e o `.exe` num runner Windows, e anexa os dois à release. O AppImage é gerado no 22.04 porque só roda em sistemas com a glibc igual ou mais nova que a de onde foi montado.
 
 Localmente, `npx tauri build --bundles appimage` gera um AppImage para teste em `src-tauri/target/release/bundle/appimage/`.
+
+## Licença
+
+[MIT](LICENSE). Pode usar, copiar, modificar e distribuir, inclusive em projetos comerciais, desde que mantenha o aviso de copyright.
 
 <br>
 
