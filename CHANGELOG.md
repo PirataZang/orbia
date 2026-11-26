@@ -33,6 +33,8 @@ Como escrever:
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-25
+
 ### Added
 
 - **Raciocínio na conversa:** com o Claude e com os modelos do Ollama que pensam, o raciocínio aparece recolhido acima da resposta. Ele fica salvo junto com a conversa, mesmo quando o modelo não chega a escrever a resposta.
